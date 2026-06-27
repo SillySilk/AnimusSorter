@@ -1,0 +1,25 @@
+# Python caches / venv
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Runtime
+logs/
+sorted/
+
+# OS / editor cruft
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+*.tmp
+
+# Release tooling — private/dev only, never shipped to the public storefront
+publish-release.bat
+scripts/publish_release.py
