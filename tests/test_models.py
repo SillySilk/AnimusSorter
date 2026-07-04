@@ -6,11 +6,22 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sorting_tray.models import (  # noqa: E402
+    READABLE_EXTENSIONS,
     Bin,
     build_filename,
     name_has_hyphen,
     next_serial_start,
 )
+
+
+def test_readable_extensions_include_new_formats():
+    for ext in (".avif", ".heic", ".heif", ".jfif", ".jpe", ".apng"):
+        assert ext in READABLE_EXTENSIONS
+
+
+def test_readable_extensions_exclude_exotica():
+    for ext in (".psd", ".ico", ".tga", ".qoi"):
+        assert ext not in READABLE_EXTENSIONS
 
 
 def test_build_filename_single_subject():

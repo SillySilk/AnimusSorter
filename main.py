@@ -6,6 +6,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import QApplication
 
 from sorting_tray.applog import get_logger, log_path, setup_logging
+from sorting_tray.fonts import load_fonts
 from sorting_tray.mainwindow import MainWindow
 
 
@@ -14,6 +15,8 @@ def main() -> int:
     log = get_logger("startup")
     app = QApplication(sys.argv)
     app.setApplicationName("sorting-tray")
+    # Register the bundled industrial-redesign fonts before any widget is styled.
+    load_fonts()
     try:
         window = MainWindow()
         window.showMaximized()

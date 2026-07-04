@@ -28,17 +28,25 @@ The punch keys are **latching car-radio presets**: press a key to *arm* a bin (i
 Animus Sorter renames files into the convention AnimaForge reads to derive trigger tokens automatically:
 
 ```
-NAME_SERIAL_CATEGORY.ext
+NAME_SERIAL_CATEGORY.png
 ```
 
 ```
 Aria_001_Character.png            one subject
-Aria-Garden_004_Character.jpg     two subjects (hyphen separates names)
+Aria-Garden_004_Character.png     two subjects (hyphen separates names)
 Picnic basket_012_Object.png      spaces allowed inside a name
-Morning-Evening_002_Style.gif     works for any category
+Morning-Evening_002_Style.png     works for any category
 ```
 
 Load the `sorted/` folder into AnimaForge and your **Name Cast** pre-fills straight from the filenames — no find-and-replace across hundreds of caption files.
+
+## 🖼 Feed it anything, get PNG back
+
+The tray reads **jpg, jpeg, jfif, jpe, png, apng, gif, webp, bmp, tiff, tif, avif, heic, heif** — including iPhone photos and the AVIFs modern browsers save. On Execute, everything is **losslessly converted to PNG**: EXIF rotation baked in, transparency preserved, first frame of animations. One uniform format out, no matter what went in. Files that can't be decoded get an unmissable **UNREADABLE** reject tag in the tray.
+
+## 🤖 Optional AI assist (local)
+
+Point it at a running **[LM Studio](https://lmstudio.ai)** vision model and each bin gains **Analyze** (detect who's in the bin's images) and **Auto-sort tray** (file matching images in automatically — exactly-this-set, no outsiders). Entirely optional, entirely local; the app never touches the network otherwise. Auto-sorted images just land in bins — nothing is renamed until *you* hit Execute.
 
 ## ⚡ Quick start
 
@@ -47,14 +55,14 @@ pip install -r requirements.txt
 run.bat
 ```
 
-Requires **Python 3.11+** (Windows). Dependencies: PyQt6, Pillow.
+Requires **Python 3.11+** (Windows). Dependencies: PyQt6, Pillow (≥ 11.1), pillow-heif.
 
 ## 🧭 The workflow
 
 1. **Open** a folder and pick the project category — **Characters**, **Objects**, or **Styles** (one per project).
 2. **Name your bins** — one subject set per bin (`Aria`, or `Aria + Garden`).
 3. **Sort** — arm a bin and click images in, or drag tiles. One image at a time.
-4. **Execute** — every binned image is renamed `NAME_SERIAL_CATEGORY.ext` and moved into `sorted/`.
+4. **Execute** — every binned image is converted to PNG, renamed `NAME_SERIAL_CATEGORY.png`, and moved into `sorted/`.
 
 Fully local. No network, no accounts, no uploads.
 

@@ -5,41 +5,111 @@ from __future__ import annotations
 import random
 from pathlib import Path
 
-from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QRect, Qt
-from PyQt6.QtGui import QColor, QImage, QPixmap
+from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, QRect, QRectF, Qt
+from PyQt6.QtGui import (
+    QBrush,
+    QColor,
+    QFont,
+    QFontMetrics,
+    QImage,
+    QLinearGradient,
+    QPainter,
+    QPen,
+    QPixmap,
+)
 from PyQt6.QtWidgets import (
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
 from .applog import get_logger
+from .analysis import AnalyzeWorker, AutoSortWorker
+from .analysis_ui import ConfirmCharactersDialog, SettingsDialog
+from .assets import load_svg_pixmap
+from .audio import SoundController
 from .bins import BinPanel
 from .controlbar import CategoryDialog, ControlBar
-from .gallery import ID_ROLE, Gallery
+from .gallery import ID_ROLE, Gallery, GalleryFrame
+from .llm import verify_server
+from .painted import DebossedLabel
+from .settings import Settings
 
 log = get_logger("main")
-from .loader import ThumbnailLoader
+from .loader import THUMB_BASE, ThumbnailLoader
 from .models import (
     READABLE_EXTENSIONS,
     Category,
     ImageItem,
     Project,
     build_filename,
+    export_as_png,
     next_serial_start,
 )
 from .styles import APP_QSS
 
 
-def _placeholder_pixmap(size: int = 96) -> QPixmap:
+def _placeholder_pixmap(size: int = THUMB_BASE) -> QPixmap:
+    """QA reject tag for unreadable files: steel plate, ember hazard bands,
+    tilted UNREADABLE stamp. Recognition only — the file stays binnable."""
     pm = QPixmap(size, size)
-    pm.fill(QColor("#3a3a3a"))
+    pm.fill(QColor("#1a1a1a"))
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+    grad = QLinearGradient(0, 0, 0, size)
+    grad.setColorAt(0.0, QColor("#232323"))
+    grad.setColorAt(1.0, QColor("#1a1a1a"))
+    p.fillRect(0, 0, size, size, QBrush(grad))
+
+    band_h = size // 8
+    stripe_w = size // 10
+    p.setPen(Qt.PenStyle.NoPen)
+    for band_top in (0, size - band_h):
+        p.save()
+        p.setClipRect(0, band_top, size, band_h)
+        p.rotate(-45)
+        p.setBrush(QColor("#a83a10"))
+        for i in range(-3 * size // stripe_w, 3 * size // stripe_w):
+            if i % 2 == 0:
+                p.drawRect(QRectF(i * stripe_w, -2 * size, stripe_w, 5 * size))
+        p.restore()
+
+    p.save()
+    p.translate(size / 2, size / 2)
+    p.rotate(-8)
+    font = QFont("DM Mono")
+    font.setPixelSize(int(size * 0.11))
+    font.setBold(True)
+    font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 110)
+    p.setFont(font)
+    fm = QFontMetrics(font)
+    text = "UNREADABLE"
+    pad = size * 0.035
+    tw = fm.horizontalAdvance(text)
+    rect = QRectF(-tw / 2 - pad, -fm.height() / 2 - pad, tw + 2 * pad, fm.height() + 2 * pad)
+    p.setPen(QColor(0, 0, 0, 190))
+    p.drawText(rect.translated(0, 2), Qt.AlignmentFlag.AlignCenter, text)
+    p.setPen(QColor("#e2581f"))
+    p.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
+    p.setPen(QPen(QColor(226, 88, 31, 200), max(2.0, size / 80)))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRect(rect)
+    p.restore()
+
+    p.setPen(QPen(QColor("#0e0e0e"), 2))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRect(1, 1, size - 2, size - 2)
+    p.end()
     return pm
 
 
@@ -56,46 +126,103 @@ class MainWindow(QMainWindow):
         self.loader: ThumbnailLoader | None = None
         self.armed_bin: int | None = None
         self._anims: set = set()  # keep fly animations alive until they finish
+        self._workers: set = set()  # keep analysis threads alive until they finish
+
+        self.settings = Settings.load()
+        self.sound = SoundController(self)
 
         self.control = ControlBar()
         self.gallery = Gallery()
+        self.gallery_frame = GalleryFrame(self.gallery)
         self.bins = BinPanel()
-        self.execute_btn = QPushButton("START PROCESSING")
+        # The trays are large now, so they overflow vertically — house them in a
+        # scroll area that grows a vertical scrollbar to reach the lower bins.
+        self.bins_scroll = QScrollArea()
+        self.bins_scroll.setObjectName("binsScroll")
+        self.bins_scroll.setWidget(self.bins)
+        self.bins_scroll.setWidgetResizable(True)
+        self.bins_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.bins_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.bins_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.execute_btn = QPushButton("EXECUTE")
         self.execute_btn.setObjectName("executeButton")
         self.execute_btn.clicked.connect(self.on_execute)
+        # Execute now rides in the control bar's left column, not a bottom bar.
+        self.control.mount_execute(self.execute_btn)
 
         split = QSplitter(Qt.Orientation.Horizontal)
-        split.addWidget(self.gallery)
-        split.addWidget(self.bins)
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 2)
-        split.setSizes([760, 500])
-
-        # Top row: control bar fills the width, Start Processing pinned top-right.
-        top_row = QHBoxLayout()
-        top_row.setContentsMargins(0, 0, 8, 0)
-        top_row.setSpacing(8)
-        top_row.addWidget(self.control, 1)
-        top_row.addWidget(self.execute_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        split.addWidget(self.gallery_frame)
+        split.addWidget(self.bins_scroll)
+        # Give the bins roughly double their old share — they're now big square
+        # trays — while the gallery stays the larger, dominant sorting tray.
+        split.setStretchFactor(0, 5)
+        split.setStretchFactor(1, 3)
+        split.setSizes([1150, 710])
 
         central = QWidget()
         layout = QVBoxLayout(central)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addLayout(top_row)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+        layout.addWidget(self.control)
         layout.addWidget(split, 1)
+        layout.addWidget(self._build_footer())
         self.setCentralWidget(central)
 
         self.control.open_requested.connect(self.on_open)
         self.control.sort_changed.connect(self.on_sort)
         self.control.grid_size_changed.connect(self.gallery.set_icon_size)
         self.control.armed_changed.connect(self.on_armed_changed)
+        self.control.sound_toggled.connect(self.sound.set_muted)
         self.gallery.tile_activated.connect(self.on_tile_activated)
         self.bins.images_dropped.connect(self.move_to_bin)
         self.bins.return_requested.connect(self.return_to_tray)
+        self.bins.names_changed.connect(self.control.set_key_label)
+        self.bins.analyze_requested.connect(self.on_analyze)
+        self.bins.autosort_requested.connect(self.on_autosort)
+        self.control.settings_requested.connect(self.on_settings)
         self.gallery.trash_requested.connect(self.trash_from_tray)
 
         self._set_enabled(False)
+        self._update_execute_label()
+
+    def _build_footer(self) -> QWidget:
+        """Thin decorative maker's-plate strip: tool clip-art + forged-for mark."""
+        bar = QWidget()
+        bar.setObjectName("footerBar")
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(12, 4, 12, 4)
+        row.setSpacing(8)
+        rack = QLabel("THE RACK")
+        rack.setObjectName("footerText")
+        row.addWidget(rack)
+        for name in ("anvil", "hammer", "flame", "horseshoe", "hexbolt"):
+            icon = QLabel()
+            icon.setPixmap(load_svg_pixmap(name, "#8a6a2f", 16))
+            row.addWidget(icon)
+        row.addStretch(1)
+        plate = DebossedLabel("FORGED FOR ANIMA · MMXXVI", QLabel().font(), "#6f665a")
+        plate.setObjectName("footerText")
+        row.addWidget(plate)
+        return bar
+
+    def _update_execute_label(self) -> None:
+        total = sum(len(bw.image_ids()) for bw in self.bins.bins)
+        filled = sum(1 for bw in self.bins.bins if bw.image_ids())
+        plural = "BIN" if filled == 1 else "BINS"
+        self.execute_btn.setText(f"EXECUTE · {total} PRINTS · {filled} {plural}")
+
+    def _update_gallery_status(self) -> None:
+        if self.armed_bin is not None:
+            self.gallery_frame.set_status(
+                f"ARMED · BIN {self.armed_bin + 1} — CLICK PRINTS TO FILE", armed=True
+            )
+        else:
+            n = len(self.tray_order)
+            self.gallery_frame.set_status(f"{n} PRINTS UNSORTED", armed=False)
 
     def _set_enabled(self, on: bool) -> None:
         self.execute_btn.setEnabled(on)
@@ -131,12 +258,15 @@ class MainWindow(QMainWindow):
         for bw in self.bins.bins:
             bw.clear_images()
             bw.set_flagged(False)
+            bw.set_category_label(category.value)
         self.control.disarm()
 
         self.control.set_category(category)
         self.setWindowTitle(f"sorting-tray  —  {folder_path.name}  [{category.value}]")
         self._refresh_gallery()
         self._set_enabled(True)
+        self._update_execute_label()
+        self._update_gallery_status()
         log.info("opened %s [%s]: %d images, gallery shows %d",
                  folder_path.name, category.value, len(paths), self.gallery.count())
         self._start_loading()
@@ -188,11 +318,19 @@ class MainWindow(QMainWindow):
 
     # --- arming / click-to-shoot -----------------------------------------
     def on_armed_changed(self, idx: int) -> None:
+        was_armed = self.armed_bin is not None
         self.armed_bin = idx if idx >= 0 else None
         log.debug("armed bin -> %s", self.armed_bin)
+        # Mechanical key SFX: ka-chunk on any latch (including a switch), pop on
+        # full release. Programmatic disarm with nothing armed stays silent.
+        if self.armed_bin is not None:
+            self.sound.play_push()
+        elif was_armed:
+            self.sound.play_release()
         self.gallery.set_armed_mode(self.armed_bin is not None)
         for bw in self.bins.bins:
             bw.set_armed(bw.index == self.armed_bin)
+        self._update_gallery_status()
 
     def on_tile_activated(self, image_id: int) -> None:
         """While a bin is latched, each clicked thumbnail flies straight to it."""
@@ -259,6 +397,8 @@ class MainWindow(QMainWindow):
             item.location = bin_index
             bw.add_image(image_id, self.thumbs.get(image_id), item.path.name)
         self.gallery.remove_ids(ids)
+        self._update_execute_label()
+        self._update_gallery_status()
 
     def return_to_tray(self, bin_index: int, ids: list[int]) -> None:
         if not self.project:
@@ -270,6 +410,8 @@ class MainWindow(QMainWindow):
             if image_id not in self.tray_order:
                 self.tray_order.append(image_id)
         self._refresh_gallery()
+        self._update_execute_label()
+        self._update_gallery_status()
 
     def trash_from_tray(self, ids: list[int]) -> None:
         """Optionally delete unsorted tray junk from disk, with confirm."""
@@ -296,8 +438,123 @@ class MainWindow(QMainWindow):
             if image_id in self.tray_order:
                 self.tray_order.remove(image_id)
         self.gallery.remove_ids(ids)
+        self._update_gallery_status()
         if errors:
             QMessageBox.warning(self, "Some files not deleted", "\n".join(errors[:12]))
+
+    # --- AI assist: analyze + auto-sort -----------------------------------
+    def on_settings(self) -> None:
+        SettingsDialog(self.settings, self).exec()
+
+    def _llm_config(self):
+        return self.settings.get("lmstudio_url"), self.settings.get("lmstudio_model")
+
+    def _server_ready(self) -> bool:
+        url, _model = self._llm_config()
+        ok, detail = verify_server(url)
+        if not ok:
+            QMessageBox.warning(
+                self, "LM Studio not ready",
+                f"{detail}\n\nStart LM Studio, load a vision model, then try again.\n"
+                f"(Configure the URL/model with the ⚙ button.)",
+            )
+        return ok
+
+    def on_analyze(self, bin_index: int) -> None:
+        if not self.project or not self._server_ready():
+            return
+        bw = self.bins.bins[bin_index]
+        ids = bw.image_ids()
+        paths = [str(self.project.images[i].path) for i in ids]
+        names = [n.strip() for n in bw.names() if n.strip()]
+        url, model = self._llm_config()
+        bw.set_busy(True)
+        self.statusBar().showMessage(f"Analyzing {len(paths)} images in bin {bin_index + 1}…")
+        worker = AnalyzeWorker(paths, names, self.project.category.value, url, model, self)
+        worker.finished_ok.connect(lambda figs, b=bin_index, oids=ids: self._analyze_done(b, oids, figs))
+        worker.failed.connect(lambda msg, b=bin_index: self._analyze_failed(b, msg))
+        worker.finished.connect(lambda w=worker: self._workers.discard(w))
+        self._workers.add(worker)
+        worker.start()
+
+    def _analyze_failed(self, bin_index: int, msg: str) -> None:
+        self.bins.bins[bin_index].set_busy(False)
+        self.statusBar().clearMessage()
+        QMessageBox.warning(self, "Analyze failed", msg)
+
+    def _analyze_done(self, bin_index: int, ids: list[int], figures: list) -> None:
+        bw = self.bins.bins[bin_index]
+        self.statusBar().clearMessage()
+        figures_with_thumbs = []
+        for fig in figures:
+            rep = fig.get("rep_index", 0)
+            image_id = ids[rep] if 0 <= rep < len(ids) else (ids[0] if ids else None)
+            pm = self.thumbs.get(image_id) if image_id is not None else None
+            figures_with_thumbs.append((fig.get("description", ""), pm))
+        names = [n.strip() for n in bw.names() if n.strip()]
+        dialog = ConfirmCharactersDialog(figures_with_thumbs, names, self)
+        if dialog.exec() == dialog.DialogCode.Accepted:
+            bw.set_roster(dialog.result_roster())
+            self.statusBar().showMessage(
+                f"Bin {bin_index + 1} ready to auto-sort — {len(bw.roster)} subject(s) profiled.",
+                6000)
+        bw.set_busy(False)
+
+    def on_autosort(self, bin_index: int) -> None:
+        if not self.project or not self._server_ready():
+            return
+        bw = self.bins.bins[bin_index]
+        items = [(i, str(self.project.images[i].path)) for i in self.tray_order]
+        if not items:
+            QMessageBox.information(self, "Tray empty", "No unsorted images left to scan.")
+            return
+        resp = QMessageBox.question(
+            self, "Auto-sort tray",
+            f"Scan {len(items)} tray image(s) and file the ones that match "
+            f"“{' · '.join(bw.roster)}”?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if resp != QMessageBox.StandardButton.Yes:
+            return
+
+        names = [n.strip() for n in bw.names() if n.strip()]
+        url, model = self._llm_config()
+        bw.set_busy(True)
+
+        progress = QProgressDialog(
+            f"Scanning tray for bin {bin_index + 1}…", "Cancel", 0, len(items), self)
+        progress.setWindowTitle("Auto-sort")
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        worker = AutoSortWorker(items, bw.roster, names, self.project.category.value, url, model, self)
+        worker.progress.connect(
+            lambda scanned, total, filed: self._autosort_progress(progress, scanned, total, filed))
+        worker.matched.connect(lambda image_id, b=bin_index: self.move_to_bin(b, [image_id]))
+        worker.finished_ok.connect(
+            lambda filed, scanned, b=bin_index: self._autosort_done(b, progress, filed, scanned))
+        worker.failed.connect(lambda msg, b=bin_index: self._autosort_failed(b, progress, msg))
+        worker.finished.connect(lambda w=worker: self._workers.discard(w))
+        progress.canceled.connect(worker.cancel)
+        self._workers.add(worker)
+        worker.start()
+
+    def _autosort_progress(self, progress, scanned, total, filed) -> None:
+        progress.setLabelText(f"Scanned {scanned}/{total} · {filed} filed")
+        progress.setValue(scanned)
+
+    def _autosort_done(self, bin_index, progress, filed, scanned) -> None:
+        progress.close()
+        self.bins.bins[bin_index].set_busy(False)
+        QMessageBox.information(
+            self, "Auto-sort done",
+            f"Filed {filed} of {scanned} scanned image(s) into bin {bin_index + 1}.\n"
+            f"Unmatched images stayed in the tray.")
+
+    def _autosort_failed(self, bin_index, progress, msg) -> None:
+        progress.close()
+        self.bins.bins[bin_index].set_busy(False)
+        QMessageBox.warning(self, "Auto-sort failed", msg)
 
     # --- execute ----------------------------------------------------------
     def on_execute(self) -> None:
@@ -352,6 +609,8 @@ class MainWindow(QMainWindow):
                 return
 
         renamed, errors = self._rename(active, folder, category)
+        self._update_execute_label()
+        self._update_gallery_status()
 
         summary = (
             f"Sorted {renamed} image(s) from {len(active)} bin(s) into the "
@@ -371,27 +630,37 @@ class MainWindow(QMainWindow):
         errors: list[str] = []
         # Sorted images leave the working folder for a `sorted/` subfolder, like
         # bagging up a finished bin and putting it away — what's left in the tray
-        # is all that still needs sorting.
+        # is all that still needs sorting. Every export is written as PNG; the
+        # original file (any format) is consumed by the conversion.
         dest = folder / "sorted"
         dest.mkdir(exist_ok=True)
+        total = sum(len(ids) for _bw, ids, _nb in active)
+        progress = QProgressDialog("Exporting to PNG…", None, 0, total, self)
+        progress.setWindowTitle("Executing")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setMinimumDuration(0)
+        done = 0
         for bw, ids, name_block in active:
             serial = next_serial_start(dest, name_block, category.value)
             for image_id in ids:
                 item = self.project.images[image_id]
-                ext = item.path.suffix
                 # Skip past any name that is already taken in the sorted folder.
                 while True:
-                    target = dest / build_filename(name_block, serial, category.value, ext)
+                    target = dest / build_filename(name_block, serial, category.value, ".png")
                     if not target.exists() or target == item.path:
                         break
                     serial += 1
                 try:
                     if target != item.path:
-                        item.path.rename(target)
+                        export_as_png(item.path, target)
                         item.path = target
                     renamed += 1
                     serial += 1
-                except OSError as exc:
-                    errors.append(f"{item.path.name}: {exc.strerror or exc}")
+                except Exception as exc:
+                    errors.append(f"{item.path.name}: {exc}")
+                done += 1
+                progress.setValue(done)
+                progress.setLabelText(f"Exporting to PNG… {done}/{total}")
             bw.clear_images()
+        progress.close()
         return renamed, errors

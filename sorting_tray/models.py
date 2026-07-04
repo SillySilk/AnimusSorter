@@ -2,12 +2,12 @@
 
 The output filename format is the heart of the project:
 
-    NAME_SERIAL_CATEGORY.ext        e.g. Homer-Marge_004_Character.jpg
+    NAME_SERIAL_CATEGORY.ext        e.g. Homer-Marge_004_Character.png
 
 - NAME      one or more subject names joined by '-'. Spaces allowed inside a name.
 - SERIAL    zero-padded 3-digit, per bin, starting at 001.
 - CATEGORY  literal 'Character' | 'Object' | 'Style', locked at project open.
-- ext       the original extension, preserved untouched.
+- ext       always '.png' on output — export losslessly converts every source.
 
 The underscore is structural and never appears inside a field.
 """
@@ -19,6 +19,14 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 
+from PIL import Image, ImageOps
+from pillow_heif import register_heif_opener
+
+# HEIC/HEIF decode for every consumer of this module (loader, export, tests).
+# Hard dependency — a missing pillow-heif fails loudly at import, per the
+# no-fallbacks rule.
+register_heif_opener()
+
 
 class Category(str, Enum):
     CHARACTER = "Character"
@@ -26,10 +34,13 @@ class Category(str, Enum):
     STYLE = "Style"
 
 
-# Extensions Pillow/Qt decode reliably. Extension is preserved on rename; we
-# never touch the bytes, only the name.
+# Extensions Pillow (+ pillow-heif) decodes reliably for scraped/photo folders.
+# Export converts everything to PNG, so odd input extensions cost nothing
+# downstream. Deliberately excluded: .psd/.ico/.tga/.qoi and other exotica —
+# not what scrapers or cameras produce.
 READABLE_EXTENSIONS = {
-    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif",
+    ".jpg", ".jpeg", ".jfif", ".jpe", ".png", ".apng", ".gif", ".webp",
+    ".bmp", ".tiff", ".tif", ".avif", ".heic", ".heif",
 }
 
 BIN_COUNT = 8
@@ -62,6 +73,34 @@ def next_serial_start(folder: Path, name_block: str, category: str) -> int:
         if m:
             highest = max(highest, int(m.group(1)))
     return highest + 1
+
+
+def export_as_png(src: Path, target: Path) -> None:
+    """Move `src` to `target`, converting to PNG when needed.
+
+    Already-PNG sources are renamed byte-identically (no re-encode). Anything
+    else is decoded with Pillow, EXIF orientation baked in, mode normalized
+    (alpha preserved), first frame only for animated sources, then saved as a
+    PNG carrying the source ICC profile. `src` is deleted only after `target`
+    is written successfully; on any failure `src` is left untouched and a
+    partially written `target` is removed.
+    """
+    if src.suffix.lower() == ".png":
+        src.rename(target)
+        return
+    try:
+        with Image.open(src) as img:
+            icc = img.info.get("icc_profile")
+            img = ImageOps.exif_transpose(img)
+            if img.mode not in ("RGB", "RGBA"):
+                has_alpha = img.mode in ("LA", "PA") or "transparency" in img.info
+                img = img.convert("RGBA" if has_alpha else "RGB")
+            kwargs = {"icc_profile": icc} if icc else {}
+            img.save(target, format="PNG", **kwargs)
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+    src.unlink()
 
 
 def name_has_hyphen(name: str) -> bool:

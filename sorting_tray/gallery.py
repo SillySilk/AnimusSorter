@@ -9,10 +9,27 @@ drags export that id via a private mime type the bins read.
 from __future__ import annotations
 
 from PyQt6.QtCore import QMimeData, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QIcon, QKeyEvent, QMouseEvent, QPixmap, QWheelEvent
-from PyQt6.QtWidgets import QListWidget, QListWidgetItem
+from PyQt6.QtGui import (
+    QFont,
+    QIcon,
+    QKeyEvent,
+    QMouseEvent,
+    QPainter,
+    QPixmap,
+    QWheelEvent,
+)
+from PyQt6.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
 
 from .applog import get_logger
+from .assets import load_svg_pixmap
+from .painted import StampedLabel, draw_tray_shell
 
 log = get_logger("gallery")
 
@@ -170,3 +187,72 @@ class Gallery(QListWidget):
         data = QMimeData()
         data.setData(MIME_IDS, encode_ids(ids))
         return data
+
+
+def _repolish(widget) -> None:
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
+
+
+class GalleryFrame(QWidget):
+    """The big sorting tray: one large riveted sheet-metal tray (same family as
+    the bins, just oversized) holding the stamped factory header, a status line
+    and the thumbnail cavity below — an object sitting on the floor, not the
+    whole left field."""
+
+    def __init__(self, gallery: Gallery, parent=None):
+        super().__init__(parent)
+        self.setObjectName("galleryFrame")
+        self.gallery = gallery
+        self.gallery.setObjectName("galleryList")
+
+        col = QVBoxLayout(self)
+        # Clear the painted tray walls + rivets so content sits inside the tray.
+        col.setContentsMargins(16, 14, 16, 16)
+        col.setSpacing(4)
+
+        header = QHBoxLayout()
+        header.setSpacing(8)
+        anvil = QLabel()
+        anvil.setPixmap(load_svg_pixmap("anvil", "#15110b", 26))
+        header.addWidget(anvil)
+
+        stamp_col = QVBoxLayout()
+        stamp_col.setSpacing(0)
+        self._stamp = StampedLabel(
+            "THING-O-MATIC CORP.", QFont("Alfa Slab One", 19), "#15110b", rotate_deg=-0.8
+        )
+        stamp_col.addWidget(self._stamp)
+        sub = QLabel("DO NOT MOVE FROM SORTING FLOOR")
+        sub.setStyleSheet(
+            "color:#1d150d; font-family:'Zilla Slab'; font-weight:700;"
+            "font-size:11px; letter-spacing:2px;"
+        )
+        stamp_col.addWidget(sub)
+        header.addLayout(stamp_col)
+        header.addStretch(1)
+
+        self.status = QLabel("0 PRINTS UNSORTED")
+        self.status.setObjectName("galleryStatus")
+        header.addWidget(self.status, 0, Qt.AlignmentFlag.AlignTop)
+        col.addLayout(header)
+
+        col.addWidget(self.gallery, 1)
+
+    def paintEvent(self, _event):
+        """Paint the oversized riveted tray shell behind the header + cavity."""
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        draw_tray_shell(
+            p, self.width(), self.height(),
+            armed=self.property("armed") == "true",
+        )
+        p.end()
+
+    def set_status(self, text: str, armed: bool = False) -> None:
+        self.status.setText(text)
+        val = "true" if armed else "false"
+        for w in (self.status, self.gallery, self):
+            w.setProperty("armed", val)
+            _repolish(w)
+        self.update()  # repaint the tray shell ring
